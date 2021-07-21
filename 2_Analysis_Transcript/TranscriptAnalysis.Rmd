@@ -1,0 +1,787 @@
+---
+title: "Analyze transcript data of 5' sensing data for Synechocystis RNase E"
+author:
+- affiliation: AG Annegret Wilde, Institute of Biology III
+  name: "Ute Hoffmann"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    fig_width: 15
+    fig_height: 8
+    theme: united
+    toc: yes
+    number_sections: true
+  pdf_document:
+    toc: yes
+    number_sections: true
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+require("knitr")
+opts_knit$set(root.dir = "/data/Dokumente/uni/Doktorarbeit/T161V_analyses/00_Manuscript/Code/2_Analysis_Transcript/")
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(ggpubr)
+library(pheatmap)
+library(RColorBrewer)
+library(clusterProfiler)
+library(enrichplot)
+library(rtracklayer)
+library(tidyverse)
+```
+
+```{r define-functions, echo=FALSE}
+# some functions which are incredibly handy
+
+## functions to analyze DESeq2 results object, create diagnostic plots
+
+count_up_down <- function(deseq2_dframe, foldchange=1, padjusted=0.01)
+{
+  deseq2_dframe <- subset(deseq2_dframe, !is.na(deseq2_dframe$padj))
+  # create vectors of down- or upregulated features, give out their numbers
+  down <- deseq2_dframe$log2FoldChange < -foldchange & deseq2_dframe$padj < padjusted
+  up <- deseq2_dframe$log2FoldChange > foldchange & deseq2_dframe$padj < padjusted
+  
+  print(paste("number of features down: ", sum(down)))
+  print(paste("number of features up: ", sum(up)))
+}
+
+return_up_down <- function(deseq2_dframe, foldchange=1, padjusted=0.01)
+{
+  deseq2_dframe <- subset(deseq2_dframe, !is.na(deseq2_dframe$padj))
+  # create vectors of down- or upregulated features, give out their numbers
+  down <- deseq2_dframe$log2FoldChange < -foldchange & deseq2_dframe$padj < padjusted
+  up <- deseq2_dframe$log2FoldChange > foldchange & deseq2_dframe$padj < padjusted
+  
+  vector_differentiallyExpressed <- c(row.names(deseq2_dframe)[down],row.names(deseq2_dframe)[up])
+  return(vector_differentiallyExpressed)
+}
+
+volcanoPlot_ggplot <-  function(deseq2_dframe, foldchange=1, padjusted=0.01, color=TRUE, text=FALSE, numbers=TRUE, lines_padj_FC=TRUE)
+{
+  # compare: https://biocorecrg.github.io/CRG_RIntroduction/volcano-plots.html
+  
+  # The significantly differentially expressed genes are the ones found in the upper-left and upper-right corners.
+  # Add a column to the data frame to specify if they are UP- or DOWN- regulated (log2FoldChange respectively positive or negative)
+  
+  # add a column of NAs
+  df_copy <- as.data.frame(deseq2_dframe)
+  df_copy$diffexpressed <- "NO"
+  # if log2Foldchange > 0.6 and pvalue < 0.05, set as "UP" 
+  df_copy$diffexpressed[df_copy$log2FoldChange > foldchange & df_copy$padj < padjusted] <- "UP"
+  # if log2Foldchange < -0.6 and pvalue < 0.05, set as "DOWN"
+  df_copy$diffexpressed[df_copy$log2FoldChange < -foldchange & df_copy$padj < padjusted] <- "DOWN"
+  
+  # prepare labels of plot
+  df_copy$delabel <- NA
+  df_copy$delabel[df_copy$diffexpressed != "NO"] <- row.names(df_copy)[df_copy$diffexpressed != "NO"]
+  
+  # Plot
+  p <- ggplot(data=df_copy, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed, label=delabel)) + geom_point(alpha=0.3, show.legend = FALSE) + 
+    theme_light() + labs(y="-Log10(p.adj_BH)", x="Log2FC") + theme(legend.position = "none")
+  
+  # color points
+  mycolors <- c("#e69f00b2","#005a96b2",  "#d3d3d3b2")
+  names(mycolors) <- c("DOWN", "UP", "NO")
+  p <- p + scale_colour_manual(values = mycolors)
+  
+  # Add vertical lines for log2FoldChange thresholds, and one horizontal line for the p-value threshold 
+  if(lines_padj_FC){
+    p <- p + geom_vline(xintercept=c(-foldchange, foldchange), linetype="dotted") +
+      geom_hline(yintercept=-log10(padjusted), linetype="dotted") # http://www.sthda.com/english/wiki/ggplot2-line-types-how-to-change-line-types-of-a-graph-in-r-software
+  }
+  
+  # Now write down the name of genes beside the points...
+  # Create a new column "delabel" to de, that will contain the name of genes differentially expressed (NA in case they are not)
+  if(text){
+    p <- p + geom_text_repel(fontface="italic")   #geom_text()
+  }
+  
+  return(p)
+  
+}
+
+MAplot_ggplot <-  function(deseq2_dframe, foldchange=1, padjusted=0.05, color=TRUE, text=FALSE, numbers=TRUE, lines_padj_FC=TRUE, y_axis_label="Log2FC")
+{
+  # add a column of NAs
+  df_copy <- as.data.frame(deseq2_dframe)
+  df_copy$diffexpressed <- "NO"
+  # if log2Foldchange > 0 and pvalue < 0.05, set as "UP" 
+  df_copy$diffexpressed[df_copy$log2FoldChange > 0 & df_copy$padj < padjusted] <- "UP"
+  # if log2Foldchange < 0 and pvalue < 0.05, set as "DOWN"
+  df_copy$diffexpressed[df_copy$log2FoldChange < 0 & df_copy$padj < padjusted] <- "DOWN"
+  
+  # prepare labels of plot
+  df_copy$delabel <- NA
+  df_copy$delabel[df_copy$diffexpressed != "NO"] <- row.names(df_copy)[df_copy$diffexpressed != "NO"]
+  
+  # Plot
+  p <- ggplot(data=df_copy, aes(x=baseMean, y=log2FoldChange, col=diffexpressed, label=delabel)) + geom_point(size=0.5, show.legend = FALSE) + 
+    theme_light() + labs(y=y_axis_label, x="Mean of Normalized Counts") + theme(legend.position = "none") + scale_x_continuous(trans='log10')
+  
+  # color points
+  mycolors <- c("#e69f00ff","#005a96ff",  "#d3d3d3ff")
+  names(mycolors) <- c("DOWN", "UP", "NO")
+  p <- p + scale_colour_manual(values = mycolors)
+  
+  # Add vertical lines for log2FoldChange thresholds, and one horizontal line for the p-value threshold 
+  if(lines_padj_FC){
+    p <- p + geom_hline(yintercept=c(-foldchange, 0, foldchange), linetype="dotted")
+  }
+  
+  # Now write down the name of genes beside the points...
+  # Create a new column "delabel" to de, that will contain the name of genes differentially expressed (NA in case they are not)
+  if(text){
+    p <- p + geom_text_repel(fontface="italic")   #geom_text()
+  }
+  
+  return(p)
+}
+
+PCA_plot <- function(dds, title){
+  # plots PCA for DESeq2 Data Set object, uses rlog, assumes DESeq2 data set object for dWT / WT / TV comparison
+  rld <- rlog(dds)
+  pcaData <- plotPCA(rld, intgroup=c("strain"), returnData=TRUE)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+  ggplot(pcaData, aes(PC1, PC2, color=strain)) +
+    geom_point(size=3) +
+    xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+    ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+    coord_fixed() + theme_light() + scale_color_manual(name="Strain", values=c("#000000ff", "#005a96ff", "#e69f00ff"), breaks=c("WT", "dWT", "TV"), labels=c("WT", "rne(WT)", "rne(5p)")) + 
+    theme(legend.position="bottom", legend.box="vertical", legend.margin=margin(t=-0.2, r=0, b=0, l=0, unit="cm"))  + 
+    labs(title=title)
+}
+
+heatmap_plot <- function(dds, title){
+  # plots heat map for DESeq2 Data Set object, uses rlog
+  dat <- assay(rlog(dds))
+  dists_rl <- dist(t(dat))
+  mat <- as.matrix(dists_rl)
+  #rownames(mat) <- c(rep("rne(WT)", 3),rep("WT", 3), rep("TV",2))
+  colnames(mat) <- NULL
+  colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+  pheatmap(
+    mat,
+    clustering_distance_rows = dists_rl,
+    clustering_distance_cols = dists_rl,
+    col = colors,
+    main = "Sample-to-sample distances"
+  )
+}
+
+pvaluePlot <- function(result_object, title_plot){ 
+  use <- result_object$baseMean > metadata(result_object)$filterThreshold
+  h1 <- hist(result_object$pvalue[!use], breaks=0:50/50, plot=FALSE)
+  h2 <- hist(result_object$pvalue[use], breaks=0:50/50, plot=FALSE)
+  colori <- c(`filtered (low count)`="khaki", `not filtered`="powderblue")
+  barplot(height = rbind(h1$counts, h2$counts), beside = FALSE,
+        col = colori, space = 0, main = paste("Histogram of p-values for", title_plot), ylab="Frequency", xlab="P-values")
+  text(x = c(0, length(h1$counts)), y = 0, label = paste(c(0,1)),
+     adj = c(0.5,1.7), xpd=NA)
+  legend("topright", fill=rev(colori), legend=rev(names(colori)))
+}
+
+
+  browseKEGGNew_3 <- function (x, pathID, cluster_number) 
+{
+  url <- paste0("http://www.kegg.jp/kegg-bin/show_pathway?", 
+                pathID, "/", x[cluster_number][11])
+  browseURL(url)
+  invisible(url)
+}
+
+### code functional enrichment function
+  
+# read in term_to_gene and term_to_name for enricher()
+term_to_gene <- read.table("input/20200113_locusTags_GOterms.tsv", sep="\t", header=T)
+tmp <- term_to_gene[,2]
+tmp2 <- term_to_gene[,1]
+term_to_gene[,1] <- tmp
+term_to_gene[,2] <- tmp2
+names(term_to_gene) <- c("GO_ID", "locus_tag")
+
+term_to_name <- read.delim("input/term_to_name.csv", sep="\t", header=T)
+
+go_functional_enrichment <- function(DESeq2_dataframe, foldchange=0.8, padjusted=0.05, write=FALSE, path_up="", path_down=""){
+  DESEq2_dataframe <- as.data.frame(DESeq2_dataframe)
+  locus_tags <- row.names(DESEq2_dataframe)
+  
+  down <- DESEq2_dataframe$log2FoldChange < -foldchange & DESEq2_dataframe$padj < padjusted
+  up <- DESEq2_dataframe$log2FoldChange > foldchange & DESEq2_dataframe$padj < padjusted
+  
+  ego_up <- enricher(locus_tags[up], universe=locus_tags, TERM2GENE = term_to_gene, TERM2NAME=term_to_name)
+  print(head(ego_up))
+  
+  if(write){
+    write.csv(ego_up, path_up)
+  }
+  
+  ego_down <- enricher(locus_tags[down], universe=locus_tags, TERM2GENE = term_to_gene, TERM2NAME=term_to_name)
+  print(head(ego_down))
+ 
+  if(write){
+    write.csv(ego_down, path_down)
+  }
+}
+
+kegg_functional_enrichment <- function(DESEq2_dataframe, foldchange=0.8, padjusted=0.05, write=FALSE, path_up="", path_down=""){
+  locus_tags <- row.names(DESEq2_dataframe)
+  
+  down <- DESEq2_dataframe$log2FoldChange < -foldchange & DESEq2_dataframe$padj < padjusted
+  up <- DESEq2_dataframe$log2FoldChange > foldchange & DESEq2_dataframe$padj < padjusted
+  
+  ekeggup <- enrichKEGG(gene         = locus_tags[up],
+                               universe      = locus_tags,
+                               organism     = 'syn',
+                               pAdjustMethod = "BH",
+                               pvalueCutoff  = 0.01,
+                               qvalueCutoff  = 0.05)
+  print(head(ekeggup))
+  
+  if(write){
+    write.csv(ekeggup, path_up)
+  }
+  
+  ekeggdown <- enrichKEGG(gene         = locus_tags[down],
+                                 universe      = locus_tags,
+                                 organism     = 'syn',
+                                 pAdjustMethod = "BH",
+                                 pvalueCutoff  = 0.01,
+                                 qvalueCutoff  = 0.05)
+  print(head(ekeggdown))
+  
+  if(write){
+    write.csv(ekeggdown, path_down)
+  }
+}
+
+# gsea
+
+go_gsea <- function(DESEq2_dataframe, write=FALSE, path=""){
+  locus_tags <- row.names(DESEq2_dataframe)
+  geneList <- DESEq2_dataframe$log2FoldChange
+  names(geneList) <- locus_tags
+  geneList = sort(geneList, decreasing = TRUE)
+  
+  set.seed(42)
+  go_gsea_object <- GSEA(geneList, TERM2GENE = term_to_gene, TERM2NAME=term_to_name, seed=TRUE)
+  print(head(go_gsea_object)[,1:10])
+  
+  if(write){
+    write.csv(go_gsea_object, path)
+  }
+  return(go_gsea_object)
+}
+
+kegg_gsea <- function(DESEq2_dataframe, write=FALSE, path=""){
+  locus_tags <- row.names(DESEq2_dataframe)
+  geneList <- DESEq2_dataframe$log2FoldChange
+  names(geneList) <- locus_tags
+  geneList = sort(geneList, decreasing = TRUE)
+  
+  set.seed(42)
+  kegg_gsea_object <- gseKEGG(geneList, organism="syn", minGSSize=10, pvalueCutoff = 0.05, seed=TRUE)
+  tryCatch({
+    print(head(kegg_gsea_object)[,1:10])
+  
+  if(write){
+    write.csv(kegg_gsea_object, path)
+  }
+  return(kegg_gsea_object)}, error=function(e){
+    print("nothing enriched")
+  })
+}
+
+```
+
+# Aim of the analysis
+
+Analyse transcript level data from 5' sensing comparisons and do some exploratory data analysis.
+
+# DESeq2 analysis
+
+Read in data: htseq-count files created with usegalaxy.eu
+
+```{r read-input}
+htseq_CDS <- read.delim("input/Galaxy151-[CDS_htseqCount].tabular", header=TRUE, row.names=1)
+htseq_TUs <- read.delim("input/Galaxy154-[TU_htseqCount].tabular", header=TRUE, row.names=1)
+zuordnung <- read.delim("input/FileNames_Galaxy-transcript-history.csv", header=TRUE)
+row.names(zuordnung) <- names(htseq_CDS)[c(2,3,1,8,7,6,5,4)]
+names(htseq_CDS) <- zuordnung[names(htseq_CDS),]$strain
+names(htseq_TUs) <- zuordnung[names(htseq_TUs),]$strain
+coldata <- read.csv("input/colData_transcript.csv", row.names=1)
+htseq_CDS <- htseq_CDS[,row.names(coldata)]
+htseq_TUs <- htseq_TUs[,row.names(coldata)]
+```
+
+Do actual analysis
+
+```{r do-analysis}
+# create DESeq2 data object
+ddsMat_CDS <- DESeqDataSetFromMatrix(countData = htseq_CDS,
+                                 colData = coldata,
+                                 design = ~ strain)
+ddsMat_TUs <- DESeqDataSetFromMatrix(countData = htseq_TUs,
+                                 colData = coldata,
+                                 design = ~ strain)
+
+# run DESeq
+ddsMat_CDS <- DESeq(ddsMat_CDS) 
+ddsMat_TUs <- DESeq(ddsMat_TUs) 
+
+write.csv(data.frame(factor=ddsMat_CDS$sizeFactor), file="output/transcript_sizeFactors.csv")
+write.csv(data.frame(counts(ddsMat_CDS, normalized=TRUE)), file="output/Transcript_CDS_normalizedCounts.csv")
+```
+
+## Diagnostic Plots
+
+```{r diagnostic-plots}
+plotDispEsts(ddsMat_CDS, main="CDS comparison", xlab="Mean of Normalized Counts", ylab="Dispersion")
+plotDispEsts(ddsMat_TUs, main="TU comparison", xlab="Mean of Normalized Counts", ylab="Dispersion")
+pdf(file="output/DESeq2_Plots/CDS/ddsMat_CDS_DispEsts.pdf", width=4.5, height=4.5)
+plotDispEsts(ddsMat_CDS, main="CDS comparison", xlab="Mean of Normalized Counts", ylab="Dispersion")
+dev.off()
+pdf(file="output/DESeq2_Plots/TU/ddsMat_TU_DispEsts.pdf", width=4.5, height=4.5)
+plotDispEsts(ddsMat_TUs, main="TU comparison", xlab="Mean of Normalized Counts", ylab="Dispersion")
+dev.off()
+
+p <- PCA_plot(ddsMat_CDS, "RNA Features")
+p 
+ggsave("output/DESeq2_Plots/CDS/ddsMat_CDS_PCA.pdf", plot=p, width=9, height=9, units="cm")
+
+p <- PCA_plot(ddsMat_TUs, "TU")
+p
+ggsave("output/DESeq2_Plots/TU/ddsMat_TU_PCA.pdf", plot=p, width=9, height=9, units="cm")
+
+p <- heatmap_plot(ddsMat_CDS, "RNA Features")
+p
+ggsave("output/DESeq2_Plots/CDS/ddsMat_CDS_heatMap.pdf", plot=p, width=15, height=12, units="cm")
+
+p <- heatmap_plot(ddsMat_TUs, "TU")
+p
+ggsave("output/DESeq2_Plots/TU/ddsMat_TU_heatMap.pdf", plot=p, width=15, height=12, units="cm")
+```
+
+## Use size factors to create .grp files
+
+```{r}
+if(FALSE){
+  transcript_coverage <- read.delim("input/transcript_coverage_combined_5sensing.txt", header=TRUE, row.names=1)
+  # create DESeq2 data object
+  ddsMat_transc <- DESeqDataSetFromMatrix(countData = transcript_coverage,
+                                          colData = coldata,
+                                          design = ~ strain)
+  ddsMat_transc$sizeFactor <- ddsMat_CDS$sizeFactor
+  transc_norm_counts <- counts(ddsMat_transc, normalized=TRUE)
+  rm(ddsMat_transc)
+  
+  grp_File <- data.frame("WT"=apply(transc_norm_counts[,c("WT1", "WT2", "WT3")],1,mean), "dWT"=apply(transc_norm_counts[,c("dWT1", "dWT2", "dWT3")],1,mean), "TV"=apply(transc_norm_counts[,c("TV1", "TV2")],1,mean))
+  grp_File$seqname <- rep(NA, length(grp_File$WT))
+  seqnames <- c("BA000022.2", "AP004310.1", "AP004311.1", "AP004312.1", "AP006585.1")
+  for(i in seqnames){
+    grp_File[which(grepl(i, row.names(grp_File))),]$seqname <- i
+  }
+  grp_File$strand <- rep(NA, length(grp_File$WT))
+  for(i in c("plus", "minus")){
+    grp_File[which(grepl(i, row.names(grp_File))),]$strand <- i
+  }
+  for(i in seqnames){
+    for(j in c("plus", "minus")){
+      tmp <- subset(grp_File, grp_File$seqname==i & grp_File$strand==j)[,c("WT", "dWT", "TV")]
+      s=""
+      if(j=="plus"){
+        s="fw"
+      }else{
+        s="rev"
+      }
+      write.table(tmp, file=paste("output/grp/transcript/", i, "_transcript_WT-dWT-TV_", s, ".grp", sep=""), sep="\t", row.names=FALSE, col.names = FALSE)
+    }
+  }
+}
+```
+
+## Extract Results
+
+Extract results and use changeAnnotation_DESeq2.py and annotation_locusTags_stand13012021.csv to add annotation to tables.
+
+```{r extract-results}
+# extract results
+CDS_result_dWT_TV <- results(ddsMat_CDS, contrast=c("strain", "dWT", "TV")) # dWT/TV -> higher in dWT: higher log2FC
+write_tsv(rownames_to_column(as.data.frame(CDS_result_dWT_TV[order(CDS_result_dWT_TV$padj),])), file="output/DESeq2_resultsTables/results_CDS-dWT-TV.tsv")
+
+CDS_result_dWT_WT <- results(ddsMat_CDS, contrast=c("strain", "dWT", "WT")) # dWT/WT -> higher in dWT: higher log2FC
+write_tsv(rownames_to_column(as.data.frame(CDS_result_dWT_WT[order(CDS_result_dWT_WT$padj),])), file="output/DESeq2_resultsTables/results_CDS-dWT-WT.tsv")
+
+TUs_result_dWT_TV <- results(ddsMat_TUs, contrast=c("strain", "dWT", "TV")) # dWT/TV -> higher in dWT: higher log2FC
+write_tsv(rownames_to_column(as.data.frame(TUs_result_dWT_TV[order(TUs_result_dWT_TV$padj),])), file="output/DESeq2_resultsTables/results_TUs-dWT-TV.tsv")
+
+TUs_result_dWT_WT <- results(ddsMat_TUs, contrast=c("strain", "dWT", "WT")) # dWT/WT -> higher in dWT: higher log2FC
+write_tsv(rownames_to_column(as.data.frame(TUs_result_dWT_WT[order(TUs_result_dWT_WT$padj),])), file="output/DESeq2_resultsTables/results_TUs-dWT-WT.tsv")
+```
+
+Execute in directory "DESeq2_resultsTables":
+python changeAnnotation_DESeq2.py  results_CDS-dWT-TV.tsv results_CDS-dWT-TV_annotated.tsv
+python changeAnnotation_DESeq2.py  results_CDS-dWT-WT.tsv results_CDS-dWT-WT_annotated.tsv
+
+python TUs_add_info.py  results_TUs-dWT-TV.tsv results_TUs-dWT-TV_annotated.tsv
+python TUs_add_info.py  results_TUs-dWT-WT.tsv results_TUs-dWT-WT_annotated.tsv
+
+## p-Value plots for different comparisons
+
+```{r pvalue-plots, fig.wide = TRUE}
+pvaluePlot(CDS_result_dWT_TV, "CDS rne(WT)-rne(5p)")
+pvaluePlot(CDS_result_dWT_WT, "CDS rne(WT)-WT")
+pvaluePlot(TUs_result_dWT_TV, "rne(WT)-rne(5p)")
+pvaluePlot(TUs_result_dWT_WT, "TUs rne(WT)-WT")
+```
+```{r pvalue-plots-2, echo=FALSE}
+pdf(file="output/DESeq2_Plots/CDS/ddsMat_CDS-dWT-TV_pValuePlot.pdf", width=4.5, height=4.5)
+pvaluePlot(CDS_result_dWT_TV, "CDS rne(WT)-rne(5p)")
+dev.off()
+pdf(file="output/DESeq2_Plots/CDS/ddsMat_CDS-dWT-WT_pValuePlot.pdf", width=4.5, height=4.5)
+pvaluePlot(CDS_result_dWT_WT, "CDS rne(WT)-WT")
+dev.off()
+
+pdf(file="output/DESeq2_Plots/TU/ddsMat_TUs-dWT-TV_pValuePlot.pdf", width=4.5, height=4.5)
+pvaluePlot(TUs_result_dWT_TV, "rne(WT)-rne(5p)")
+dev.off()
+pdf(file="output/DESeq2_Plots/TU/ddsMat_TUs-dWT-WT_pValuePlot.pdf", width=4.5, height=4.5)
+pvaluePlot(TUs_result_dWT_WT, "TUs rne(WT)-WT")
+dev.off()
+```
+
+## Filter for non-NA values
+
+```{r}
+CDS_result_dWT_TV <- subset(CDS_result_dWT_TV, !is.na(CDS_result_dWT_TV$padj))
+nrow(CDS_result_dWT_TV)
+
+CDS_result_dWT_WT <- subset(CDS_result_dWT_WT, !is.na(CDS_result_dWT_WT$padj))
+nrow(CDS_result_dWT_WT)
+
+TUs_result_dWT_TV <- subset(TUs_result_dWT_TV, !is.na(TUs_result_dWT_TV$padj))
+nrow(TUs_result_dWT_TV)
+
+TUs_result_dWT_WT <- subset(TUs_result_dWT_WT, !is.na(TUs_result_dWT_WT$padj))
+nrow(TUs_result_dWT_WT)
+```
+
+## Create MA and Volcano plots for different comparisons, count features up-, downregulated
+
+### CDS
+
+#### CDS rne(WT), rne(5p)
+```{r, fig.wide = TRUE}
+count_up_down(CDS_result_dWT_TV, foldchange=0.8, padjusted=0.05)
+
+p <- volcanoPlot_ggplot(as.data.frame(CDS_result_dWT_TV), foldchange=0.8, padjusted=0.05, text=TRUE)
+p
+ggsave("output/DESeq2_Plots/CDS/ddsMat_CDS-dWT-TV_VolcanoPlot.pdf", plot=p, width=15, height=12, units="cm")
+
+p <- MAplot_ggplot(CDS_result_dWT_TV, foldchange=0.8, y_axis_label = "Log2 fold-change(rne(WT)/rne(5p))")# + ylim(-5.5,+5.5)
+p
+ggsave("output/DESeq2_Plots/CDS/ddsMat_CDS-dWT-TV_MAplot.pdf",plot=p, width=15, height=12, units="cm")
+```
+
+#### CDS rne(WT), WT
+```{r, fig.wide = TRUE}
+count_up_down(CDS_result_dWT_WT, foldchange=0.8, padjusted=0.05)
+
+p <- volcanoPlot_ggplot(as.data.frame(CDS_result_dWT_WT), foldchange=0.8, padjusted=0.05, text=TRUE)
+p
+ggsave("output/DESeq2_Plots/CDS/ddsMat_CDS-dWT-WT_VolcanoPlot.pdf", plot=p, width=15, height=12, units="cm")
+
+p <- MAplot_ggplot(CDS_result_dWT_WT, foldchange=0.8, y_axis_label = "Log2 fold-change(rne(WT)/WT)")# + ylim(-5.5,+5.5)
+p
+ggsave("output/DESeq2_Plots/CDS/ddsMat_CDS-dWT-WT_MAplot.pdf",plot=p, width=15, height=12, units="cm")
+```
+
+### TUs
+
+#### TUs rne(WT), rne(5p)
+```{r, fig.wide = TRUE}
+count_up_down(TUs_result_dWT_TV, foldchange=0.8, padjusted=0.05)
+p <- volcanoPlot_ggplot(as.data.frame(TUs_result_dWT_TV), foldchange=0.8, padjusted=0.05)
+p
+ggsave("output/DESeq2_Plots/TU/ddsMat_TUs-dWT-TV_VolcanoPlot.pdf", plot=p, width=15, height=12, units="cm")
+
+p <- MAplot_ggplot(TUs_result_dWT_TV, foldchange=0.8, y_axis_label = "Log2 fold-change(rne(WT)/rne(5p))")# + ylim(-5.5,+5.5)
+p
+ggsave("output/DESeq2_Plots/TU/ddsMat_TUs-dWT-TV_MAplot.pdf",plot=p, width=15, height=12, units="cm")
+```
+
+#### TU rne(WT), WT
+```{r, fig.wide = TRUE}
+count_up_down(TUs_result_dWT_WT, foldchange=0.8, padjusted=0.05)
+p <- volcanoPlot_ggplot(as.data.frame(TUs_result_dWT_WT), foldchange=0.8, padjusted=0.05)
+p
+ggsave("output/DESeq2_Plots/TU/ddsMat_TUs-dWT-WT_VolcanoPlot.pdf", plot=p, width=15, height=12, units="cm")
+
+p <- MAplot_ggplot(TUs_result_dWT_WT, foldchange=0.8, y_axis_label = "Log2 fold-change(rne(WT)/WT)")# + ylim(-5.5,+5.5)
+p
+ggsave("output/DESeq2_Plots/TU/ddsMat_TUs-dWT-WT_MAplot.pdf",plot=p, width=15, height=12, units="cm")
+```
+
+```{r save-image, echo=FALSE}
+save.image(file = "DESeq2_analyses_CDS_TUs.RData")
+```
+
+```{r echo=FALSE}
+#load("DESeq2_analyses_CDS_TUs.RData")
+```
+
+# Exploratory Data Analysis
+
+## Create table how many RNA features of a certain type are affected by differential expression
+
+```{r}
+features <- rtracklayer::import("input/20210217_syne_onlyUnique_withFeat.gff3")
+CDS_features <- subset(features, features$type=="CDS")
+TUs <- rtracklayer::import("input/Kopf_4091_TUs_combined.gff3")
+
+types <- rep(c("CDS","5UTR", "3UTR", "tRNA", "rRNA", "ncRNA", "asRNA", "CRISPR", "misc"),2)
+updown <- c(rep("up",9), rep("down",9))
+df_features <- data.frame(cbind(type=types, updown=updown))
+
+types <- c("CDS","5UTR", "3UTR", "tRNA", "rRNA", "ncRNA", "asRNA", "CRISPR", "misc")
+for(t in types){
+  t_feat <- subset(features, features$type==t)
+  
+  subset_CDS <- subset(CDS_result_dWT_TV, row.names(CDS_result_dWT_TV) %in% t_feat$locus_tag)
+  
+  index_up <- which(df_features$type==t & df_features$updown=="up")
+  index_down <- which(df_features$type==t & df_features$updown=="down") 
+  
+  df_features[index_up,"number_feat_overlap"] <- nrow(subset(subset_CDS, subset_CDS$padj<0.05 & subset_CDS$log2FoldChange>0.8)) # count number of features affected
+  df_features[index_down,"number_feat_overlap"] <- nrow(subset(subset_CDS, subset_CDS$padj<0.05 & subset_CDS$log2FoldChange<(-0.8))) # count number of features affected
+  
+  df_features[df_features$type==t,"number_total"] <- length(t_feat)
+} 
+
+df_features
+write.csv(df_features, file="output/RNAfeatures_upDown_dWT_TV.csv")
+```
+```{r}
+# prepare data.frame for barplot
+types <- rep(c("CDS","5UTR", "3UTR", "tRNA", "rRNA", "ncRNA", "asRNA", "CRISPR", "misc"),2)
+updown <- c(rep("up",9), rep("down",9))
+df_features <- data.frame(cbind(type=types, updown=updown))
+
+types <- c("CDS","5UTR", "3UTR", "tRNA", "rRNA", "ncRNA", "asRNA", "CRISPR", "misc")
+for(t in types){
+  t_feat <- subset(features, features$type==t)
+  
+  subset_CDS <- subset(CDS_result_dWT_WT, row.names(CDS_result_dWT_WT) %in% t_feat$locus_tag)
+  
+  index_up <- which(df_features$type==t & df_features$updown=="up")
+  index_down <- which(df_features$type==t & df_features$updown=="down") 
+  
+  df_features[index_up,"number_feat_overlap"] <- nrow(subset(subset_CDS, subset_CDS$padj<0.05 & subset_CDS$log2FoldChange>0.8)) # count number of features affected
+  df_features[index_down,"number_feat_overlap"] <- nrow(subset(subset_CDS, subset_CDS$padj<0.05 & subset_CDS$log2FoldChange<(-0.8))) # count number of features affected
+  
+  df_features[df_features$type==t,"number_total"] <- length(t_feat)
+} 
+
+df_features
+write.csv(df_features, file="output/RNAfeatures_upDown_dWT_WT.csv")
+```
+
+## Functional Enrichment
+
+```{r functional-enrichment}
+go_functional_enrichment(CDS_result_dWT_TV, write=TRUE, path_up="output/enrichment/go_enrichment/dWT_TV_up.csv", path_down="output/enrichment/go_enrichment/dWT_TV_down.csv")
+go_functional_enrichment(CDS_result_dWT_WT, write=TRUE, path_up="output/enrichment/go_enrichment/dWT_WT_up.csv", path_down="output/enrichment/go_enrichment/dWT_WT_down.csv")
+
+kegg_functional_enrichment(CDS_result_dWT_TV, write=TRUE, path_up="output/enrichment/kegg_enrichment/dWT_TV_up.csv", path_down="output/enrichment/kegg_enrichment/dWT_TV_down.csv")
+kegg_functional_enrichment(CDS_result_dWT_WT, write=TRUE, path_up="output/enrichment/kegg_enrichment/dWT_WT_up.csv", path_down="output/enrichment/kegg_enrichment/dWT_WT_down.csv")
+```
+
+## Gene Set Enrichment Analyses
+
+```{r gsea}
+dWT_TV_go_gsea <- go_gsea(CDS_result_dWT_TV, write=TRUE, path="output/enrichment/go_gsea/dWT_TV_go_gsea.csv")
+dWT_WT_go_gsea <- go_gsea(CDS_result_dWT_WT, write=TRUE, path="output/enrichment/go_gsea/dWT_WT_go_gsea.csv")
+
+dWT_TV_kegg_gsea <- kegg_gsea(CDS_result_dWT_TV, write=TRUE, path="output/enrichment/kegg_gsea/dWT_TV_kegg_gsea.csv")
+dWT_WT_kegg_gsea <- kegg_gsea(CDS_result_dWT_WT, write=TRUE, path="output/enrichment/kegg_gsea/dWT_WT_kegg_gsea.csv")
+```
+
+## Plots of GSEA
+
+```{r}
+gseaplot2(dWT_TV_go_gsea, geneSetID=1:4)
+
+p <- gseaplot2(dWT_TV_kegg_gsea, geneSetID =1)
+p
+ggsave("output/enrichment/Plots/dWT_TV_KEGG.pdf", plot=p, width=15, height=12, units="cm")
+```
+```{r}
+gseaplot2(dWT_WT_go_gsea, geneSetID=1:9)
+
+p <- gseaplot2(dWT_WT_kegg_gsea, geneSetID =1:4)
+p
+ggsave("output/enrichment/Plots/dWT_WT_KEGG.pdf", plot=p, width=15, height=12, units="cm")
+```
+
+
+```{r}
+browseKEGGNew_3(dWT_TV_kegg_gsea, "syn03010", 1) # 
+browseKEGGNew_3(dWT_WT_kegg_gsea, "syn03010", 1) # 
+browseKEGGNew_3(dWT_WT_kegg_gsea, "syn00910", 2) # 
+browseKEGGNew_3(dWT_WT_kegg_gsea, "syn00920", 3) # 
+browseKEGGNew_3(dWT_WT_kegg_gsea, "syn00190", 4) # 
+```
+
+## GSEA for RNA features
+
+First, a data frame in which feature names are assigned to their feature type (CDS, ncRNA, ...) has to be created and the respective info read in.
+
+```{r}
+df_featureType <- data.frame(feature_type=as.character(features$type), feature_name=features$locus_tag)
+
+feature_type_gsea <- function(DESEq2_dataframe, write=FALSE, path=""){
+  locus_tags <- row.names(DESEq2_dataframe)
+  geneList <- DESEq2_dataframe$log2FoldChange
+  names(geneList) <- locus_tags
+  geneList = sort(geneList, decreasing = TRUE)
+  
+  set.seed(42)
+  go_gsea_object <- GSEA(geneList, TERM2GENE = df_featureType, seed=TRUE)
+  print(head(go_gsea_object)[,1:10])
+  
+  if(write){
+    write.csv(go_gsea_object, path)
+  }
+  return(go_gsea_object)
+}
+
+features_gsea_dWT_TV <- feature_type_gsea(CDS_result_dWT_TV, TRUE, "output/enrichment/GSEA_RNAfeatures_dWT-TV.csv")
+features_gsea_dWT_WT <- feature_type_gsea(CDS_result_dWT_WT, TRUE, "output/enrichment/GSEA_RNAfeatures_dWT-WT.csv")
+```
+
+```{r}
+p <- gseaplot2(features_gsea_dWT_TV, geneSetID=1:2)
+p
+ggsave("output/enrichment/Plots/dWT_TV_RNAfeatures.pdf", plot=p, width=15, height=12, units="cm")
+```
+
+```{r}
+p <- gseaplot2(features_gsea_dWT_WT, geneSetID=1:4)
+p
+ggsave("output/enrichment/Plots/dWT_WT_RNAfeatures.pdf", plot=p, width=15, height=12, units="cm")
+```
+
+## GSEA for base means
+
+```{r}
+go_gsea_baseMeans <- function(DESEq2_dataframe, write=FALSE, path=""){
+  locus_tags <- row.names(DESEq2_dataframe)
+  geneList <- DESEq2_dataframe$baseMean
+  names(geneList) <- locus_tags
+  geneList = sort(geneList, decreasing = TRUE)
+  
+  set.seed(42)
+  go_gsea_object <- GSEA(geneList, TERM2GENE = term_to_gene, TERM2NAME=term_to_name, seed=TRUE)
+  tryCatch({
+    print(head(go_gsea_object)[,1:10])
+  
+  if(write){
+    write.csv(go_gsea_object, path)
+  }
+  return(go_gsea_object)}, error=function(e){
+    print("nothing enriched")
+  })
+}
+
+kegg_gsea_baseMean <- function(DESEq2_dataframe, write=FALSE, path=""){
+  locus_tags <- row.names(DESEq2_dataframe)
+  geneList <- DESEq2_dataframe$baseMean
+  names(geneList) <- locus_tags
+  geneList = sort(geneList, decreasing = TRUE)
+  
+  set.seed(42)
+  kegg_gsea_object <- gseKEGG(geneList, organism="syn", minGSSize=10, pvalueCutoff = 0.05, seed=TRUE)
+  tryCatch({
+    print(head(kegg_gsea_object)[,1:10])
+  
+  if(write){
+    write.csv(kegg_gsea_object, path)
+  }
+  return(kegg_gsea_object)}, error=function(e){
+    print("nothing enriched")
+  })
+}
+```
+
+## When taking width of features into account
+
+```{r}
+norm_counts <- counts(ddsMat_CDS, normalized=TRUE)
+mean_norm_counts <- apply(norm_counts, 1, mean)
+mean_norm_counts_CDS <- subset(mean_norm_counts, names(mean_norm_counts) %in% CDS_features$locus_tag)
+CDS_feat_df <- as.data.frame(CDS_features)
+row.names(CDS_feat_df) <- CDS_feat_df$locus_tag
+mean_norm_counts_CDS_width <- mean_norm_counts_CDS/CDS_feat_df[names(mean_norm_counts_CDS),]$width
+```
+
+```{r}
+mean_norm_counts_CDS_width <- sort(mean_norm_counts_CDS_width, decreasing=TRUE)
+set.seed(42)
+go_gsea_baseMeans_width <- GSEA(mean_norm_counts_CDS_width, TERM2GENE=term_to_gene, TERM2NAME = term_to_name, nPermSimple=10000, seed=TRUE)
+set.seed(42)
+kegg_gsea_baseMeans_width <- gseKEGG(mean_norm_counts_CDS_width, organism="syn", minGSSize=10, pvalueCutoff = 0.05, nPermSimple=10000, seed=TRUE)
+```
+
+# GSEA for plasmids
+
+First, a data frame in which feature names are assigned to their feature type (CDS, ncRNA, ...) has to be created and the respective info read in.
+
+```{r}
+df_plasmid <- data.frame(plasmid=as.character(seqnames(TUs)), TU_ID=TUs$index)
+
+plasmid_gsea <- function(DESEq2_dataframe, write=FALSE, path=""){
+  TU_IDs <- row.names(DESEq2_dataframe)
+  geneList <- DESEq2_dataframe$log2FoldChange
+  names(geneList) <- TU_IDs
+  geneList = sort(geneList, decreasing = TRUE)
+  
+  set.seed(42)
+  go_gsea_object <- GSEA(geneList, TERM2GENE = df_plasmid, seed=TRUE)
+  print(head(go_gsea_object)[,1:10])
+  
+  if(write){
+    write.csv(go_gsea_object, path)
+  }
+  return(go_gsea_object)
+}
+
+plasmid_gsea_dWT_TV <- plasmid_gsea(TUs_result_dWT_TV, TRUE, "output/enrichment/GSEA_plasmids_dWT-TV.csv")
+plasmid_gsea_dWT_WT <- plasmid_gsea(TUs_result_dWT_WT, TRUE, "output/enrichment/GSEA_plasmids_dWT-WT.csv")
+```
+
+```{r}
+p <- gseaplot2(plasmid_gsea_dWT_TV, geneSetID=1:2)
+p
+ggsave("output/enrichment/Plots/dWT_TV_plasmids.pdf", plot=p, width=15, height=12, units="cm")
+```
+
+```{r}
+p <- gseaplot2(plasmid_gsea_dWT_WT, geneSetID=1:3)
+p
+ggsave("output/enrichment/Plots/dWT_WT_plasmids.pdf", plot=p, width=15, height=12, units="cm")
+```
+
+```{r, echo=FALSE}
+save.image(file = "GSEA_results.RData")
+```
+
+```{r, echo=FALSE}
+#load("GSEA_results.RData")
+```
+
+# Session info {.unnumbered}
+
+```{r sessionInfo, echo=FALSE}
+sessionInfo()
+```
