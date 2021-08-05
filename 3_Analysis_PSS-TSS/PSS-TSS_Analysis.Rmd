@@ -1186,12 +1186,14 @@ p
 ```{r}
 df_TSSPSS_ratio_2 <- subset(df_TSSPSS_ratio, !is.na(df_TSSPSS_ratio$TSSPSS_ratio) & !is.infinite(df_TSSPSS_ratio$TSSPSS_ratio))
 df_TSSPSS_ratio_2$TSSPSS_ratio <- df_TSSPSS_ratio_2$TSSPSS_ratio + 0.0001
+df_TSSPSS_ratio_2$sample <- factor(df_TSSPSS_ratio_2$sample, levels=c("WT1", "WT2", "WT3", "dWT1", "dWT2", "dWT3", "TV1", "TV2"))
 p <- ggplot(data=df_TSSPSS_ratio_2, aes(x=sample, y=TSSPSS_ratio, fill=type)) + geom_violin() +
   geom_boxplot(width=0.1, color="grey", alpha=0.2, outlier.shape=NA, show.legend = FALSE) +
   scale_fill_viridis(discrete=TRUE, alpha=0.6, option="A") +
   theme_light() +
   labs(fill="", y="PSS/TSS at TSS positions", x="") + scale_y_continuous(trans="log10", limits=c(NA,10), breaks=c(0,0.01,0.1,1,10))
 p
+ggsave("output/PSS-TSS-ratios_TSSpositions.pdf",plot=p, width=15, height=12, units="cm")
 ```
 
 ```{r, echo=FALSE}
@@ -1213,6 +1215,9 @@ advanced_reduce_withBaseMeans() merges adjacent PSS positions. In a second step,
 PSS_Ranges_WT <- advanced_reduce_withBaseMeans(create_GRanges_object_from_resObject(PSS_result_dWT_TV, foldchange=1, padjusted=0.05))
 PSS_Ranges_TV <- advanced_reduce_withBaseMeans(create_GRanges_object_from_resObject(PSS_result_dWT_TV, foldchange=(-1), padjusted=0.05, up=FALSE))
 PSS_Ranges <- c(PSS_Ranges_WT, PSS_Ranges_TV)
+
+PSS_Ranges_dWTtodWT <- advanced_reduce_withBaseMeans(create_GRanges_object_from_resObject(PSS_result_dWT_WT, foldchange=1, padjusted=0.05))
+PSS_Ranges_WTtodWT <- advanced_reduce_withBaseMeans(create_GRanges_object_from_resObject(PSS_result_dWT_WT, foldchange=(-1), padjusted=0.05, up=FALSE))
 ```
 
 ## Extract data for Weblogo
@@ -1510,6 +1515,104 @@ summary(df_PSS_features_overlap_perKb[which(grepl("3UTR-up", df_PSS_features_ove
 summary(df_PSS_features_overlap_perKb[which(grepl("3UTR-down", df_PSS_features_overlap_perKb$type, fixed=TRUE)),]$counts_per_kb)
 summary(df_PSS_features_overlap_perKb[which(grepl("up", df_PSS_features_overlap_perKb$type, fixed=TRUE)),]$counts_per_kb)
 summary(df_PSS_features_overlap_perKb[which(grepl("down", df_PSS_features_overlap_perKb$type, fixed=TRUE)),]$counts_per_kb)
+```
+
+## Analyse overlap with different RNA features and number of overlaps with those features for comparison rne(WT)/WT
+
+Prepare data frames for the plots and count how many PSS are overlapping with which features, how many features of a certain type are overlapped by PSS, how many PSS are located in each feature per kb.
+
+```{r}
+# prepare data.frame for barplot
+types <- rep(c("CDS","5UTR", "3UTR", "tRNA", "rRNA", "ncRNA", "asRNA", "CRISPR", "misc"),3)
+updown <- c(rep("up",9), rep("down",9), rep("both",9))
+df_PSS_features_2 <- data.frame(cbind(type=types, updown=updown))
+df_PSS_features_2$number_feat_overlap <- NA 
+df_PSS_features_2$number_PSS_overlap <- NA
+df_PSS_features_2$number_total <- NA
+
+# extract number of overlaps with different feature types, both for up- and downregulated PSS positions
+types <- c("CDS","5UTR", "3UTR", "tRNA", "rRNA", "ncRNA", "asRNA", "CRISPR", "misc")
+for(t in types){
+  t_feat <- which(features$type == t)
+  
+  index_up <- which(df_PSS_features_2$type==t & df_PSS_features_2$updown=="up")
+  index_down <- which(df_PSS_features_2$type==t & df_PSS_features_2$updown=="down") 
+  index_both <- which(df_PSS_features_2$type==t & df_PSS_features_2$updown=="both") 
+  
+  df_PSS_features_2[index_up,"number_feat_overlap"] <- sum(countOverlaps(features[t_feat], PSS_Ranges_dWTtodWT)>0) # count number of features affected
+  df_PSS_features_2[index_up,"number_PSS_overlap"] <- sum(countOverlaps(PSS_Ranges_dWTtodWT, features[t_feat])>0) # count where PSS are located
+  df_PSS_features_2[index_down,"number_feat_overlap"] <- sum(countOverlaps(features[t_feat], PSS_Ranges_WTtodWT)>0) # count number of features affected
+  df_PSS_features_2[index_down,"number_PSS_overlap"] <- sum(countOverlaps(PSS_Ranges_WTtodWT, features[t_feat])>0) # count where PSS are located
+  df_PSS_features_2[index_both,"number_feat_overlap"] <- sum(countOverlaps(features[t_feat], PSS_Ranges_WTtodWT)>0 | countOverlaps(features[t_feat], PSS_Ranges_dWTtodWT)>0) # count number of features affected
+  df_PSS_features_2[index_both,"number_PSS_overlap"] <- sum(countOverlaps(PSS_Ranges_WTtodWT, features[t_feat])>0) + sum(countOverlaps(PSS_Ranges_dWTtodWT, features[t_feat])>0) # count where PSS are located
+  
+  df_PSS_features_2[df_PSS_features_2$type==t,"number_total"] <- length(features[t_feat])
+  }
+```
+
+```{r}
+df_PSS_features_2
+write.csv(df_PSS_features_2, file="output/overlap_RNAfeatures_PSS_rneWT-WT-comparison.csv")
+```
+
+for TUs:
+
+```{r}
+sum(countOverlaps(TUs, PSS_Ranges_dWTtodWT)>0)
+sum(countOverlaps(TUs, PSS_Ranges_WTtodWT)>0)
+sum((countOverlaps(TUs, PSS_Ranges_dWTtodWT)|countOverlaps(TUs, PSS_Ranges_WTtodWT))>0)
+```
+
+### Create bar plots
+
+Do further processing of data frames.
+
+```{r}
+df_PSS_features_barplot_2 <- subset(df_PSS_features_2, df_PSS_features_2$updown=="up" | df_PSS_features_2$updown=="down")
+
+total_overlaps_up <- sum(countOverlaps(PSS_Ranges_WT, features)>0)
+total_overlaps_down <- sum(countOverlaps(PSS_Ranges_TV, features)>0)
+
+df_PSS_features_barplot_2[,"number_feat_overlap"] <- as.integer(df_PSS_features_barplot_2[,"number_feat_overlap"])/as.integer(df_PSS_features_barplot_2[,"number_total"])*100
+
+# create column  with absolute numbers
+df_PSS_features_barplot_2$number_PSS_overlap_absolute <- NA
+df_PSS_features_barplot_2[df_PSS_features_barplot_2$updown=="up",]$number_PSS_overlap_absolute <- as.integer(df_PSS_features_barplot_2[df_PSS_features_barplot_2$updown=="up","number_PSS_overlap"])
+df_PSS_features_barplot_2[df_PSS_features_barplot_2$updown=="down",]$number_PSS_overlap_absolute <- as.integer(df_PSS_features_barplot_2[df_PSS_features_barplot_2$updown=="down","number_PSS_overlap"])
+
+# calculate percentages
+df_PSS_features_barplot_2[df_PSS_features_barplot_2$updown=="up","number_PSS_overlap"] <- as.integer(df_PSS_features_barplot_2[df_PSS_features_barplot_2$updown=="up","number_PSS_overlap"])/total_overlaps_up *100
+df_PSS_features_barplot_2[df_PSS_features_barplot_2$updown=="down","number_PSS_overlap"] <- as.integer(df_PSS_features_barplot_2[df_PSS_features_barplot_2$updown=="down","number_PSS_overlap"])/total_overlaps_down *100
+
+# rename types (5'UTR instead of 5UTR, 3'UTR instead of 3UTR)
+df_PSS_features_barplot_2[,"type"] <- rep(c("CDS","5'UTR", "3'UTR", "tRNA", "rRNA", "ncRNA", "asRNA", "CRISPR", "misc"),2)
+
+# reduce plot to information I actually care about
+df_PSS_features_barplot_2 <- df_PSS_features_barplot_2[which(!df_PSS_features_barplot_2$type=="rRNA"),] # rRNAs cannot be counted here, because multireads were excluded from analysis
+df_PSS_features_barplot_2 <- df_PSS_features_barplot_2[which(!df_PSS_features_barplot_2$type=="misc"),] # misc are actually only genes which are split by plasmid / chromosome beginning and two features (NC-2306445, NC-3547510) where I never figured out what they are. One PSS overlaps with sll8049-1. So I think one can savely ignore those
+```
+
+Do actual plotting.
+
+```{r}
+# cast type, updown as factors to influence order in which they show up in the plots
+df_PSS_features_barplot_2$type <- factor(df_PSS_features_barplot_2$type, levels=c("tRNA", "asRNA", "ncRNA", "CRISPR", "3'UTR", "5'UTR", "CDS"))
+df_PSS_features_barplot_2$updown <- c(rep("rne(WT)", 7), rep("WT",7))
+df_PSS_features_barplot_2$updown <- factor(df_PSS_features_barplot_2$updown, levels=c("rne(WT)", "WT"))
+
+# Plot: How many features of a certain kind are overlapped by PSS?
+p <- ggplot(data=df_PSS_features_barplot_2, aes(x=type,y=number_feat_overlap, fill=updown)) + geom_bar(stat="identity", position="dodge") + theme_light()+ xlab("") + ylab("Percentage PSS (%)") + scale_fill_manual(name="", values=c("#005a96ff", "#e69f00ff"), breaks=c("rne(WT)", "WT"), labels=c("rne(WT)", "WT"))
+p
+ggsave(filename = "output/barplots_overlapFeatures/barplot_percentage_of_allThisFeature_rneWT-WT-comparison.pdf", plot = p, width = 14, height = 7, units = "cm")
+
+# Plots: How many PSS are localized in which kind of feature?
+p <- ggplot(data=df_PSS_features_barplot_2, aes(x=updown,y=number_PSS_overlap, fill=type)) + geom_bar(stat="identity", position="fill") + theme_light()+ xlab("") + ylab("Percentage of all PSS (%)") + scale_fill_brewer(palette="Paired", direction=1)#scale_fill_OkabeIto(name="", order=c(2:8,1))
+p
+ggsave(filename = "output/barplots_overlapFeatures/barplot_percentage_ofAllPSS_rneWT-WT-comparison.pdf", plot = p, width = 7, height = 7, units = "cm")
+
+p <- ggplot(data=df_PSS_features_barplot_2, aes(x=updown,y=number_PSS_overlap_absolute, fill=type)) + geom_bar(stat="identity", position="stack") + theme_light()+ xlab("") + ylab("Number PSS") + scale_fill_brewer(palette="Paired", direction=1)#scale_fill_OkabeIto(name="", order=c(2:8,1))
+p
+ggsave(filename = "output/barplots_overlapFeatures/barplot_absolute_ofAllPSS_rneWT-WT-comparison.pdf", plot = p, width = 7, height = 7, units = "cm")
 ```
 
 ## GO and KEGG enrichment in set of detected PSS
